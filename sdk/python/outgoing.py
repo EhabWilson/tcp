@@ -110,7 +110,7 @@ def tcp_rx(conn: ConnectionIdentifier, data: bytes):
         # 收到SYN-ACK，回复ACK，完成三次握手
         if flags['SYN'] == 1 and flags['ACK'] == 1:
             conns[str(conn)].state = State.ESTABISHED
-            conns[str(conn)].seq = conns[str(conn)].seq + 1
+            conns[str(conn)].seq = header['ack_num']
             conns[str(conn)].ack = header['seq_num'] + 1
             seq = conns[str(conn)].seq
             ack = conns[str(conn)].ack
@@ -118,12 +118,24 @@ def tcp_rx(conn: ConnectionIdentifier, data: bytes):
             ack_pkt = raw(ack_pkt)
             tcp_tx(conn, ack_pkt)
     elif conns[str(conn)].state == State.ESTABISHED:
-        app_recv(conn, data)
+        # 将数据递交给应用层
+        if len(data) - header['header_length'] * 4 > 0:
+            app_recv(conn, data)
     elif conns[str(conn)].state == State.FIN_WAIT1:
+        # 接收到FIN-ACK，进入FIN_WAIT2阶段
         if flags['SYN'] == 1 and flags['ACK'] == 1:
-
+            conns[str(conn)].state = State.FIN_WAIT2
+            conns[str(conn)].seq = header['ack_num']
+            conns[str(conn)].ack = header['seq_num'] + 1
     elif conns[str(conn)].state == State.FIN_WAIT2:
-        # TODO
+        # 接收到FIN包，回复ACK，进入TIME-WAIT
+        if flags['SYN'] == 1 and flags['ACK'] == 0:
+            conns[str(conn)].state = State.TIMEWAIT
+            seq = conns[str(conn)].seq
+            ack = conns[str(conn)].ack
+            ack_pkt = IP(src=conn["src"]["ip"], dst=conn["dst"]["ip"]) / TCP(dport=conn["dst"]["port"],sport=conn["src"]["port"], flags=16, seq=seq,ack=ack)
+            ack_pkt = raw(ack_pkt)
+            tcp_tx(conn, ack_pkt)
     elif conns[str(conn)].state == State.CLOSING:
         # TODO
     elif conns[str(conn)].state == State.TIMEWAIT:
