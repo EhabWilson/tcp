@@ -5,7 +5,7 @@
 助教评阅时，会使用你上传的版本。
 """
 from api_type import ConnectionIdentifier
-from main import sdk_event
+from __main__ import sdk_event
 
 # ConnectionIdentifier的定义在api_type.py中
 def app_connected(conn: ConnectionIdentifier):
