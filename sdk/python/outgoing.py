@@ -7,6 +7,7 @@
 from api import *
 import random
 import struct
+import time
 from array import array
 from typing import Dict
 from enum import Enum, unique
@@ -134,15 +135,36 @@ def tcp_rx(conn: ConnectionIdentifier, data: bytes):
             conns[str(conn)].state = State.ESTABISHED
 
     elif conns[str(conn)].state == State.ESTABISHED:
-        # 回复ACK
-        conns[str(conn)].seq = header['ack_num']
-        conns[str(conn)].ack = header['seq_num'] + 1
-        seq = conns[str(conn)].seq
-        ack = conns[str(conn)].ack
-        tcp_tx(conn, tcp_pkt(conn, flags=16, seq=seq, ack=ack))
-        # 将数据递交给应用层
-        if len(data) - header['header_length'] * 4 > 0:
-            app_recv(conn, data)
+        # 收到FIN报文
+        if flags == 17:
+            # 回复ACK
+            conns[str(conn)].seq = header['ack_num']
+            conns[str(conn)].ack = header['seq_num'] + 1
+            seq = conns[str(conn)].seq
+            ack = conns[str(conn)].ack
+            tcp_tx(conn, tcp_pkt(conn, flags=16, seq=seq, ack=ack))
+            # 进入CLOSE_WAIT阶段
+            conns[str(conn)].state = State.CLOSE_WAIT
+            # 通知应用层半关闭
+            app_peer_fin(conn)
+            # 发送FIN报文
+            seq = conns[str(conn)].seq
+            ack = conns[str(conn)].ack
+            tcp_tx(conn, tcp_pkt(conn, flags=17, seq=seq, ack=ack))
+            # 进入LAST_ACK阶段
+            conns[str(conn)].state = State.LAST_ACK
+        # 收到数据
+        else:
+            # 回复ACK
+            data_len = len(data) - header['header_length'] * 4
+            conns[str(conn)].seq = header['ack_num']
+            conns[str(conn)].ack = header['seq_num'] + data_len
+            seq = conns[str(conn)].seq
+            ack = conns[str(conn)].ack
+            tcp_tx(conn, tcp_pkt(conn, flags=16, seq=seq, ack=ack))
+            # 将数据递交给应用层
+            if data_len > 0:
+                app_recv(conn, data)
 
     elif conns[str(conn)].state == State.FIN_WAIT1:
         # 接收到FIN-ACK
@@ -150,11 +172,11 @@ def tcp_rx(conn: ConnectionIdentifier, data: bytes):
             # 进入FIN_WAIT2阶段
             conns[str(conn)].state = State.FIN_WAIT2
             conns[str(conn)].seq = header['ack_num']
-            conns[str(conn)].ack = header['seq_num'] + 1
+            conns[str(conn)].ack = header['seq_num']
         # 接收到FIN
         elif flags == 17:
-            # 通知应用层
-            app_fin(conn)
+            # 通知应用层半关闭
+            app_peer_fin(conn)
             # 进入CLOSING
             conns[str(conn)].state = State.CLOSING
             # 回复ACK
@@ -167,29 +189,62 @@ def tcp_rx(conn: ConnectionIdentifier, data: bytes):
     elif conns[str(conn)].state == State.FIN_WAIT2:
         # 接收到FIN包
         if flags == 17:
-            # TIME-WAIT阶段
-            conns[str(conn)].state = State.TIMEWAIT
+            # 通知应用层半关闭
+            app_peer_fin(conn)
             # 回复ACK
             conns[str(conn)].seq = header['ack_num']
             conns[str(conn)].ack = header['seq_num'] + 1
             seq = conns[str(conn)].seq
             ack = conns[str(conn)].ack
             tcp_tx(conn, tcp_pkt(conn, flags=16, seq=seq, ack=ack))
+            # 进入TIME-WAIT阶段
+            conns[str(conn)].state = State.TIMEWAIT
+            # 倒计时
+            time_left = 10
+            while time_left > 0:
+                print('倒计时(s):', time_left)
+                time.sleep(1)
+                time_left = time_left - 1
+            # 关闭连接，通知应用层释放资源
+            conns.pop(str(conn))
+            release_connection(conn)
+
 
     elif conns[str(conn)].state == State.CLOSING:
         # 接收到FIN-ACK
         if flags == 16:
             # 进入TIME-WAIT阶段
             conns[str(conn)].state = State.TIMEWAIT
-            conns[str(conn)].seq = header['ack_num']
-            conns[str(conn)].ack = header['seq_num'] + 1
+            # 倒计时
+            time_left = 10
+            while time_left > 0:
+                print('倒计时(s):', time_left)
+                time.sleep(1)
+                time_left = time_left - 1
+            # 关闭连接，通知应用层释放资源
+            conns.pop(str(conn))
+            release_connection(conn)
 
     elif conns[str(conn)].state == State.TIMEWAIT:
-        # TODO
-    elif conns[str(conn)].state == State.CLOSE_WAIT:
-        # TODO
-    elif conns[str(conn)].state == State.LAST_ACK:
         pass
+
+    elif conns[str(conn)].state == State.CLOSE_WAIT:
+        pass
+
+    elif conns[str(conn)].state == State.LAST_ACK:
+        # 接收到FIN-ACK
+        if flags == 16:
+            # 进入TIME-WAIT阶段
+            conns[str(conn)].state = State.TIMEWAIT
+            # 倒计时
+            time_left = 10
+            while time_left > 0:
+                print('倒计时(s):', time_left)
+                time.sleep(1)
+                time_left = time_left - 1
+            # 关闭连接，通知应用层释放资源
+            conns.pop(str(conn))
+            release_connection(conn)
 
     print("tcp_rx", conn, data.decode(errors='replace'))
 

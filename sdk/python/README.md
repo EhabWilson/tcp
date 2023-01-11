@@ -8,3 +8,10 @@ pip install -r requirements.ext
 ```shell
 python main.py
 ```
+
+### 记录
+- [x] 三次握手
+- [x] 四次挥手
+- [ ] 文件传输（待定）
+- [ ] RST
+- [ ] ……
