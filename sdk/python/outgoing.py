@@ -7,6 +7,7 @@
 from api import *
 import random
 import struct
+from array import array
 from typing import Dict
 from enum import Enum, unique
 from scapy.all import *
@@ -22,6 +23,8 @@ class State(Enum):
     FIN_WAIT2       = 5
     CLOSING         = 6
     TIMEWAIT        = 7
+    CLOSE_WAIT      = 8
+    LAST_ACK        = 9
 
 # 连接状态
 class Connection(object):
@@ -46,9 +49,10 @@ def app_connect(conn: ConnectionIdentifier):
     # 发送SYN报文
     seq = random.randint(1, 1<<32 - 1)
     conns[str(conn)].seq = seq
-    syn_pkt = IP(src=conn["src"]["ip"], dst=conn["dst"]["ip"])/TCP(dport=conn["dst"]["port"], sport=conn["src"]["port"], flags=2, seq=seq)
-    syn_pkt = raw(syn_pkt)
-    tcp_tx(conn, syn_pkt)
+    tcp_tx(conn, tcp_pkt(conn, flags=2, seq=seq, ack=0))
+
+    # 进入SYN-SENT状态
+    conns[str(conn)].state = State.SYN_SENT
 
     print("app_connect", conn)
 
@@ -61,13 +65,14 @@ def app_send(conn: ConnectionIdentifier, data: bytes):
     :return:
     """
     # 发送报文
-    src_port = conn["src"]["port"]
-    dst_port = conn["dst"]["port"]
     seq = conns[str(conn)].seq
     ack = conns[str(conn)].seq
-
-    data = b''
-    tcp_tx(conn, data)
+    pkt = IP(src=conn["src"]["ip"],
+             dst=conn["dst"]["ip"])/TCP(dport=conn["dst"]["port"],
+                                        sport=conn["src"]["port"],
+                                        flags=24, seq=seq, ack=ack)/data
+    pkt = raw(pkt)
+    tcp_tx(conn, pkt)
 
     print("app_send", conn, data.decode(errors='replace'))
 
@@ -78,7 +83,14 @@ def app_fin(conn: ConnectionIdentifier):
     :param conn: 连接对象
     :return: 
     """
-    # TODO 请实现此函数
+    # 发送FIN报文
+    seq = conns[str(conn)].seq
+    ack = conns[str(conn)].ack
+    tcp_tx(conn, tcp_pkt(conn, flags=17, seq=seq, ack=ack))
+
+    # 进入FIN-WAIT1状态
+    conns[str(conn)].state = State.FIN_WAIT1
+
     print("app_fin", conn)
 
 
@@ -103,46 +115,92 @@ def tcp_rx(conn: ConnectionIdentifier, data: bytes):
     # TODO 请实现此函数
     header = parse_tcp_header(data[:20])
     flags = header['flags']
+    print(header['src_port'], ' ', header['dst_port'], ' ', flags)
 
     if conns[str(conn)].state == State.CLOSED:
         pass
     elif conns[str(conn)].state == State.SYN_SENT:
-        # 收到SYN-ACK，回复ACK，完成三次握手
-        if flags['SYN'] == 1 and flags['ACK'] == 1:
-            conns[str(conn)].state = State.ESTABISHED
+        # 收到SYN-ACK
+        if flags == 18:
+            # 回复ACK
             conns[str(conn)].seq = header['ack_num']
             conns[str(conn)].ack = header['seq_num'] + 1
             seq = conns[str(conn)].seq
             ack = conns[str(conn)].ack
-            ack_pkt = IP(src=conn["src"]["ip"], dst=conn["dst"]["ip"])/TCP(dport=conn["dst"]["port"], sport=conn["src"]["port"], flags=16, seq=seq, ack=ack)
-            ack_pkt = raw(ack_pkt)
-            tcp_tx(conn, ack_pkt)
+            tcp_tx(conn, tcp_pkt(conn, flags=16, seq=seq, ack=ack))
+            # 通知应用层
+            app_connected(conn)
+            # 完成三次握手，进入ESTABLISHED阶段
+            conns[str(conn)].state = State.ESTABISHED
+
     elif conns[str(conn)].state == State.ESTABISHED:
+        # 回复ACK
+        conns[str(conn)].seq = header['ack_num']
+        conns[str(conn)].ack = header['seq_num'] + 1
+        seq = conns[str(conn)].seq
+        ack = conns[str(conn)].ack
+        tcp_tx(conn, tcp_pkt(conn, flags=16, seq=seq, ack=ack))
         # 将数据递交给应用层
         if len(data) - header['header_length'] * 4 > 0:
             app_recv(conn, data)
+
     elif conns[str(conn)].state == State.FIN_WAIT1:
-        # 接收到FIN-ACK，进入FIN_WAIT2阶段
-        if flags['SYN'] == 1 and flags['ACK'] == 1:
+        # 接收到FIN-ACK
+        if flags == 16:
+            # 进入FIN_WAIT2阶段
             conns[str(conn)].state = State.FIN_WAIT2
             conns[str(conn)].seq = header['ack_num']
             conns[str(conn)].ack = header['seq_num'] + 1
-    elif conns[str(conn)].state == State.FIN_WAIT2:
-        # 接收到FIN包，回复ACK，进入TIME-WAIT
-        if flags['SYN'] == 1 and flags['ACK'] == 0:
-            conns[str(conn)].state = State.TIMEWAIT
+        # 接收到FIN
+        elif flags == 17:
+            # 通知应用层
+            app_fin(conn)
+            # 进入CLOSING
+            conns[str(conn)].state = State.CLOSING
+            # 回复ACK
+            conns[str(conn)].seq = header['ack_num']
+            conns[str(conn)].ack = header['seq_num'] + 1
             seq = conns[str(conn)].seq
             ack = conns[str(conn)].ack
-            ack_pkt = IP(src=conn["src"]["ip"], dst=conn["dst"]["ip"]) / TCP(dport=conn["dst"]["port"],sport=conn["src"]["port"], flags=16, seq=seq,ack=ack)
-            ack_pkt = raw(ack_pkt)
-            tcp_tx(conn, ack_pkt)
+            tcp_tx(conn, tcp_pkt(conn, flags=16, seq=seq, ack=ack))
+
+    elif conns[str(conn)].state == State.FIN_WAIT2:
+        # 接收到FIN包
+        if flags == 17:
+            # TIME-WAIT阶段
+            conns[str(conn)].state = State.TIMEWAIT
+            # 回复ACK
+            conns[str(conn)].seq = header['ack_num']
+            conns[str(conn)].ack = header['seq_num'] + 1
+            seq = conns[str(conn)].seq
+            ack = conns[str(conn)].ack
+            tcp_tx(conn, tcp_pkt(conn, flags=16, seq=seq, ack=ack))
+
     elif conns[str(conn)].state == State.CLOSING:
-        # TODO
+        # 接收到FIN-ACK
+        if flags == 16:
+            # 进入TIME-WAIT阶段
+            conns[str(conn)].state = State.TIMEWAIT
+            conns[str(conn)].seq = header['ack_num']
+            conns[str(conn)].ack = header['seq_num'] + 1
+
     elif conns[str(conn)].state == State.TIMEWAIT:
         # TODO
-
+    elif conns[str(conn)].state == State.CLOSE_WAIT:
+        # TODO
+    elif conns[str(conn)].state == State.LAST_ACK:
+        pass
 
     print("tcp_rx", conn, data.decode(errors='replace'))
+
+
+def tick():
+    """
+    这个函数会每至少100ms调用一次，以保证控制权可以定期的回到你实现的函数中，而不是一直阻塞在main文件里面。
+    它可以被用来在不开启多线程的情况下实现超时重传等功能，详见主仓库的README.md
+    """
+    # TODO 可实现此函数，也可不实现
+    pass
 
 
 def parse_tcp_header(header: bytes):
@@ -164,6 +222,7 @@ def parse_tcp_header(header: bytes):
     # 第四行：4bit报头长度 6bit保留位 6bit标志位 16bit窗口大小
     line4 = struct.unpack('>BBH', header[12:16])
     header_length = line4[0]
+    flags = line4[1] & int(b'00111111', 2)
     FIN = line4[1] & 1
     SYN = (line4[1] >> 1) & 1
     RST = (line4[1] >> 2) & 1
@@ -182,7 +241,8 @@ def parse_tcp_header(header: bytes):
         'seq_num': seq,
         'ack_num': ack,
         'header_length': header_length,
-        'flags': {
+        'flags': flags,
+        'flag': {
             'FIN': FIN,
             'SYN': SYN,
             'RST': RST,
@@ -194,3 +254,42 @@ def parse_tcp_header(header: bytes):
         'tcp_checksum': tcp_checksum,
         'urg_ptr': urg_ptr
     }
+
+def tcp_pkt(conn, flags, seq, ack, data=None):
+    '''
+    创建TCP报文
+    :param conn:    连接状态
+    :param flags:   标签
+    :param seq:     序列号
+    :param ack:     ACK
+    :param data:    数据
+    :return:  bytes数组
+    '''
+    if data == None:
+        pkt = IP(src=conn["src"]["ip"],
+                 dst=conn["dst"]["ip"]) / TCP(dport=conn["dst"]["port"],
+                                              sport=conn["src"]["port"],
+                                              flags=flags, seq=seq, ack=ack)
+        pkt = raw(pkt)[20:40]
+    else:
+        pkt = IP(src=conn["src"]["ip"],
+                 dst=conn["dst"]["ip"]) / TCP(dport=conn["dst"]["port"],
+                                              sport=conn["src"]["port"],
+                                              flags=flags, seq=seq, ack=ack) / data
+        pkt = raw(pkt)[20:]
+    return pkt
+
+# 计算checksum（经典算法）
+if struct.pack("H", 1) == b"\x00\x01":  # big endian
+    checksum_endian_transform = lambda chk: chk
+else:
+    checksum_endian_transform = lambda chk: ((chk >> 8) & 0xff) | chk << 8
+
+def checksum(pkt):
+    if len(pkt) % 2 == 1:
+        pkt += b"\0"
+    s = sum(array("H", pkt))
+    s = (s >> 16) + (s & 0xffff)
+    s += s >> 16
+    s = ~s
+    return checksum_endian_transform(s) & 0xffff
