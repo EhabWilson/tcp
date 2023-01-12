@@ -56,6 +56,7 @@ def app_connect(conn: ConnectionIdentifier):
     conns[str(conn)].state = State.SYN_SENT
 
     print("app_connect", conn)
+    print(conns[str(conn)].state,"\n")
 
 
 def app_send(conn: ConnectionIdentifier, data: bytes):
@@ -68,15 +69,10 @@ def app_send(conn: ConnectionIdentifier, data: bytes):
     # 发送报文
     seq = conns[str(conn)].seq
     ack = conns[str(conn)].ack
-    # pkt = IP(src=conn["src"]["ip"],
-    #          dst=conn["dst"]["ip"])/TCP(dport=conn["dst"]["port"],
-    #                                     sport=conn["src"]["port"],
-    #                                     flags=24, seq=seq, ack=ack)/data
-    # pkt = raw(pkt)
-    # tcp_tx(conn, pkt)
     tcp_tx(conn, tcp_pkt(conn, flags=24, seq=seq, ack=ack, data=data))
 
-    print("app_send", conn, data.decode(errors='replace'))
+    print("app_send", conn)#, data.decode(errors='replace'))
+    print(conns[str(conn)].state, "\n")
 
 
 def app_fin(conn: ConnectionIdentifier):
@@ -90,10 +86,11 @@ def app_fin(conn: ConnectionIdentifier):
     ack = conns[str(conn)].ack
     tcp_tx(conn, tcp_pkt(conn, flags=17, seq=seq, ack=ack))
 
-    # 进入FIN-WAIT1状态
+    # 改变状态
     conns[str(conn)].state = State.FIN_WAIT1
 
     print("app_fin", conn)
+    print(conns[str(conn)].state, "\n")
 
 
 def app_rst(conn: ConnectionIdentifier):
@@ -157,17 +154,17 @@ def tcp_rx(conn: ConnectionIdentifier, data: bytes):
             conns[str(conn)].state = State.LAST_ACK
         # 收到数据
         else:
-            # 回复ACK
             print("data_len: {}  header_len: {}".format(len(data), header['header_length']))
             data_len = len(data) - header['header_length'] * 4
             conns[str(conn)].seq = header['ack_num']
-            conns[str(conn)].ack = header['seq_num'] + data_len
-            seq = conns[str(conn)].seq
-            ack = conns[str(conn)].ack
-            tcp_tx(conn, tcp_pkt(conn, flags=16, seq=seq, ack=ack))
-            # 将数据递交给应用层
             if data_len > 0:
-                app_recv(conn, data)
+                # 回复ACK
+                conns[str(conn)].ack = header['seq_num'] + data_len
+                seq = conns[str(conn)].seq
+                ack = conns[str(conn)].ack
+                tcp_tx(conn, tcp_pkt(conn, flags=16, seq=seq, ack=ack))
+                # 将数据递交给应用层
+                app_recv(conn, data[header['header_length'] * 4:])
 
     elif conns[str(conn)].state == State.FIN_WAIT1:
         # 接收到FIN-ACK
@@ -249,7 +246,8 @@ def tcp_rx(conn: ConnectionIdentifier, data: bytes):
             conns.pop(str(conn))
             release_connection(conn)
 
-    print("tcp_rx", conn, data.decode(errors='replace'))
+    print("tcp_rx", conn) #, data.decode(encoding='UTF-8',errors='replace'))
+    print(conns[str(conn)].state, "\n")
 
 
 def tick():
