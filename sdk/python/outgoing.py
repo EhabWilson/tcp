@@ -67,13 +67,14 @@ def app_send(conn: ConnectionIdentifier, data: bytes):
     """
     # 发送报文
     seq = conns[str(conn)].seq
-    ack = conns[str(conn)].seq
-    pkt = IP(src=conn["src"]["ip"],
-             dst=conn["dst"]["ip"])/TCP(dport=conn["dst"]["port"],
-                                        sport=conn["src"]["port"],
-                                        flags=24, seq=seq, ack=ack)/data
-    pkt = raw(pkt)
-    tcp_tx(conn, pkt)
+    ack = conns[str(conn)].ack
+    # pkt = IP(src=conn["src"]["ip"],
+    #          dst=conn["dst"]["ip"])/TCP(dport=conn["dst"]["port"],
+    #                                     sport=conn["src"]["port"],
+    #                                     flags=24, seq=seq, ack=ack)/data
+    # pkt = raw(pkt)
+    # tcp_tx(conn, pkt)
+    tcp_tx(conn, tcp_pkt(conn, flags=24, seq=seq, ack=ack, data=data))
 
     print("app_send", conn, data.decode(errors='replace'))
 
@@ -116,7 +117,8 @@ def tcp_rx(conn: ConnectionIdentifier, data: bytes):
     # TODO 请实现此函数
     header = parse_tcp_header(data[:20])
     flags = header['flags']
-    print(header['src_port'], ' ', header['dst_port'], ' ', flags)
+    # print(header)
+    # print(header['src_port'], ' ', header['dst_port'], ' ', flags)
 
     if conns[str(conn)].state == State.CLOSED:
         pass
@@ -156,6 +158,7 @@ def tcp_rx(conn: ConnectionIdentifier, data: bytes):
         # 收到数据
         else:
             # 回复ACK
+            print("data_len: {}  header_len: {}".format(len(data), header['header_length']))
             data_len = len(data) - header['header_length'] * 4
             conns[str(conn)].seq = header['ack_num']
             conns[str(conn)].ack = header['seq_num'] + data_len
@@ -276,7 +279,7 @@ def parse_tcp_header(header: bytes):
 
     # 第四行：4bit报头长度 6bit保留位 6bit标志位 16bit窗口大小
     line4 = struct.unpack('>BBH', header[12:16])
-    header_length = line4[0]
+    header_length = line4[0] >> 4
     flags = line4[1] & int(b'00111111', 2)
     FIN = line4[1] & 1
     SYN = (line4[1] >> 1) & 1
