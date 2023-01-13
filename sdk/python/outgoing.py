@@ -8,6 +8,7 @@ from api import *
 import random
 import struct
 import time
+from datetime import datetime
 from array import array
 from typing import Dict
 from enum import Enum, unique
@@ -33,8 +34,12 @@ class Connection(object):
         self.state = state
         self.seq = seq
         self.ack = ack
+        self.sendbase = seq
 
-conns : Dict[str, Connection] = {}
+
+conns: Dict[str, Connection] = {}
+TimeoutInterval = 1000
+records: Dict[str, tuple] = {}
 
 def app_connect(conn: ConnectionIdentifier):
     """
@@ -42,15 +47,17 @@ def app_connect(conn: ConnectionIdentifier):
     你应该向想要连接的对象发送SYN报文，执行三次握手的逻辑。
     当连接建立好后，你需要调用app_connected函数，通知应用层连接已经被建立好了。
     :param conn: 连接对象
-    :return: 
+    :return:
     """
     # 创建连接记录
-    conns[str(conn)] = Connection(State.CLOSED, 0, 0)
+    seq = random.randint(1, 1 << 16 - 1)
+    conns[str(conn)] = Connection(State.CLOSED, seq, 0)
 
     # 发送SYN报文
-    seq = random.randint(1, 1<<32 - 1)
-    conns[str(conn)].seq = seq
-    tcp_tx(conn, tcp_pkt(conn, flags=2, seq=seq, ack=0))
+    pkt = tcp_pkt(conn, flags=2, seq=seq, ack=0)
+    tcp_tx(conn, pkt)
+    records[datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')] = (conn, seq, pkt)
+    conns[str(conn)].seq = (conns[str(conn)].seq + 1) % (1 << 16)
 
     # 进入SYN-SENT状态
     conns[str(conn)].state = State.SYN_SENT
@@ -69,9 +76,13 @@ def app_send(conn: ConnectionIdentifier, data: bytes):
     # 发送报文
     seq = conns[str(conn)].seq
     ack = conns[str(conn)].ack
-    tcp_tx(conn, tcp_pkt(conn, flags=24, seq=seq, ack=ack, data=data))
+    pkt = tcp_pkt(conn, flags=24, seq=seq, ack=ack, data=data)
+    tcp_tx(conn, pkt)
+    records[datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')] = (conn, seq, pkt)
+    conns[str(conn)].seq = (conns[str(conn)].seq + len(data)) % (1 << 16)
 
     print("app_send", conn)#, data.decode(errors='replace'))
+    print("len of data: {}".format(len(data)))
     print(conns[str(conn)].state, "\n")
 
 
@@ -79,12 +90,15 @@ def app_fin(conn: ConnectionIdentifier):
     """
     当应用层想要半关闭连接(FIN)时，会调用此函数。
     :param conn: 连接对象
-    :return: 
+    :return:
     """
     # 发送FIN报文
     seq = conns[str(conn)].seq
     ack = conns[str(conn)].ack
-    tcp_tx(conn, tcp_pkt(conn, flags=17, seq=seq, ack=ack))
+    pkt = tcp_pkt(conn, flags=17, seq=seq, ack=ack)
+    tcp_tx(conn, pkt)
+    records[datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')] = (conn, seq, pkt)
+    conns[str(conn)].seq = conns[str(conn)].seq + 1
 
     # 改变状态
     conns[str(conn)].state = State.FIN_WAIT1
@@ -97,7 +111,7 @@ def app_rst(conn: ConnectionIdentifier):
     """
     当应用层想要重置连接(RES)时，会调用此函数
     :param conn: 连接对象
-    :return: 
+    :return:
     """
     # TODO 请实现此函数
     print("app_rst", conn)
@@ -109,13 +123,11 @@ def tcp_rx(conn: ConnectionIdentifier, data: bytes):
     正常情况下，你会对TCP报文，根据报文内容和连接的当前状态加以处理，然后调用0个~多个api文件中的函数
     :param conn: 连接对象
     :param data: TCP报文内容，是字节数组。（含TCP报头，不含IP报头）
-    :return: 
+    :return:
     """
     # TODO 请实现此函数
     header = parse_tcp_header(data[:20])
     flags = header['flags']
-    # print(header)
-    # print(header['src_port'], ' ', header['dst_port'], ' ', flags)
 
     if conns[str(conn)].state == State.CLOSED:
         pass
@@ -123,25 +135,28 @@ def tcp_rx(conn: ConnectionIdentifier, data: bytes):
         # 收到SYN-ACK
         if flags == 18:
             # 回复ACK
-            conns[str(conn)].seq = header['ack_num']
+            conns[str(conn)].sendbase = header['ack_num']
             conns[str(conn)].ack = header['seq_num'] + 1
             seq = conns[str(conn)].seq
             ack = conns[str(conn)].ack
             tcp_tx(conn, tcp_pkt(conn, flags=16, seq=seq, ack=ack))
+            print("ACK")
             # 通知应用层
             app_connected(conn)
             # 完成三次握手，进入ESTABLISHED阶段
             conns[str(conn)].state = State.ESTABISHED
 
     elif conns[str(conn)].state == State.ESTABISHED:
-        # 收到FIN报文
+        print("data_len: {}  header_len: {}  flags: {}".format(len(data), header['header_length'], flags))
+        # 情形1：收到FIN报文
         if flags == 17:
             # 回复ACK
-            conns[str(conn)].seq = header['ack_num']
+            conns[str(conn)].sendbase = header['ack_num']
             conns[str(conn)].ack = header['seq_num'] + 1
             seq = conns[str(conn)].seq
             ack = conns[str(conn)].ack
             tcp_tx(conn, tcp_pkt(conn, flags=16, seq=seq, ack=ack))
+            print("ACK")
             # 进入CLOSE_WAIT阶段
             conns[str(conn)].state = State.CLOSE_WAIT
             # 通知应用层半关闭
@@ -149,20 +164,25 @@ def tcp_rx(conn: ConnectionIdentifier, data: bytes):
             # 发送FIN报文
             seq = conns[str(conn)].seq
             ack = conns[str(conn)].ack
-            tcp_tx(conn, tcp_pkt(conn, flags=17, seq=seq, ack=ack))
+            pkt = tcp_pkt(conn, flags=17, seq=seq, ack=ack)
+            tcp_tx(conn, pkt)
+            print("FIN")
+            records[datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')] = (conn, seq, pkt)
+            conns[str(conn)].seq = conns[str(conn)].seq + 1
             # 进入LAST_ACK阶段
             conns[str(conn)].state = State.LAST_ACK
-        # 收到数据
+        # 情形2：收到数据/ACK
         else:
-            print("data_len: {}  header_len: {}".format(len(data), header['header_length']))
+            # 计算数据长度
+            conns[str(conn)].sendbase = header['ack_num']
             data_len = len(data) - header['header_length'] * 4
-            conns[str(conn)].seq = header['ack_num']
             if data_len > 0:
                 # 回复ACK
                 conns[str(conn)].ack = header['seq_num'] + data_len
                 seq = conns[str(conn)].seq
                 ack = conns[str(conn)].ack
                 tcp_tx(conn, tcp_pkt(conn, flags=16, seq=seq, ack=ack))
+                print("ACK")
                 # 将数据递交给应用层
                 app_recv(conn, data[header['header_length'] * 4:])
 
@@ -171,7 +191,7 @@ def tcp_rx(conn: ConnectionIdentifier, data: bytes):
         if flags == 16:
             # 进入FIN_WAIT2阶段
             conns[str(conn)].state = State.FIN_WAIT2
-            conns[str(conn)].seq = header['ack_num']
+            conns[str(conn)].sendbase = header['ack_num']
             conns[str(conn)].ack = header['seq_num']
         # 接收到FIN
         elif flags == 17:
@@ -180,11 +200,12 @@ def tcp_rx(conn: ConnectionIdentifier, data: bytes):
             # 进入CLOSING
             conns[str(conn)].state = State.CLOSING
             # 回复ACK
-            conns[str(conn)].seq = header['ack_num']
+            conns[str(conn)].sendbase = header['ack_num']
             conns[str(conn)].ack = header['seq_num'] + 1
             seq = conns[str(conn)].seq
             ack = conns[str(conn)].ack
             tcp_tx(conn, tcp_pkt(conn, flags=16, seq=seq, ack=ack))
+            print("ACK")
 
     elif conns[str(conn)].state == State.FIN_WAIT2:
         # 接收到FIN包
@@ -197,12 +218,13 @@ def tcp_rx(conn: ConnectionIdentifier, data: bytes):
             seq = conns[str(conn)].seq
             ack = conns[str(conn)].ack
             tcp_tx(conn, tcp_pkt(conn, flags=16, seq=seq, ack=ack))
+            print("ACK")
             # 进入TIME-WAIT阶段
             conns[str(conn)].state = State.TIMEWAIT
             # 倒计时
             time_left = 10
             while time_left > 0:
-                print('倒计时(s):', time_left)
+                print('连接关闭倒计时(s):', time_left)
                 time.sleep(1)
                 time_left = time_left - 1
             # 关闭连接，通知应用层释放资源
@@ -256,7 +278,16 @@ def tick():
     它可以被用来在不开启多线程的情况下实现超时重传等功能，详见主仓库的README.md
     """
     # TODO 可实现此函数，也可不实现
-    pass
+    for t, record in records:
+        conn = record[0]
+        seq = record[1]
+        pkt = record[2]
+        t_str = t
+        t = datetime.strptime(t, '%Y-%m-%d %H:%M:%S.%f')
+        if conns[str(conn)].sendbase >= seq:
+            records.pop(t_str)
+        elif (datetime.now() - t).microseconds > TimeoutInterval:
+            tcp_tx(conn, pkt)
 
 
 def parse_tcp_header(header: bytes):
