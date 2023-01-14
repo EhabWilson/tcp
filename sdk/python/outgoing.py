@@ -214,7 +214,8 @@ def tcp_rx(conn: ConnectionIdentifier, data: bytes):
             data_len = len(data) - header['header_length'] * 4
             if data_len > 0:
                 # 回复ACK
-                conns[str(conn)].ack = header['seq_num'] + data_len
+                if conns[str(conn)].ack == header['seq_num']:
+                    conns[str(conn)].ack = header['seq_num'] + data_len
                 seq = conns[str(conn)].seq
                 ack = conns[str(conn)].ack
                 tcp_tx(conn, tcp_pkt(conn, flags=16, seq=seq, ack=ack))
