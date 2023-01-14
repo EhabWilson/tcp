@@ -57,7 +57,7 @@ def app_connect(conn: ConnectionIdentifier):
     :return:
     """
     # 创建连接记录
-    seq = random.randint(1, 1 << 16 - 1)
+    seq = random.randint(1, 1 << 32 - 1)
     conns[str(conn)] = Connection(State.CLOSED, seq, 0)
 
     # 发送SYN报文
@@ -85,18 +85,19 @@ def app_send(conn: ConnectionIdentifier, data: bytes):
     :return:
     """
     # 发送报文
-    seq = conns[str(conn)].seq
-    ack = conns[str(conn)].ack
-    pkt = tcp_pkt(conn, flags=24, seq=seq, ack=ack, data=data)
-    tcp_tx(conn, pkt)
-    check = Timer(RTO / 1000, retransmit_check, (conn, pkt, seq))
-    check.start()
-    # records[datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')] = (conn, seq, pkt)
-    conns[str(conn)].seq = conns[str(conn)].seq + len(data)
+    if conns[str(conn)] != State.CLOSED:
+        seq = conns[str(conn)].seq
+        ack = conns[str(conn)].ack
+        pkt = tcp_pkt(conn, flags=24, seq=seq, ack=ack, data=data)
+        tcp_tx(conn, pkt)
+        check = Timer(RTO / 1000, retransmit_check, (conn, pkt, seq))
+        check.start()
+        # records[datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')] = (conn, seq, pkt)
+        conns[str(conn)].seq = conns[str(conn)].seq + len(data)
 
-    print("app_send", conn)  # , data.decode(errors='replace'))
-    print("len of data: {}".format(len(data)))
-    print(conns[str(conn)].state, "\n")
+        print("app_send", conn)  # , data.decode(errors='replace'))
+        print("len of data: {}".format(len(data)))
+        print(conns[str(conn)].state, "\n")
 
 
 def app_fin(conn: ConnectionIdentifier):
@@ -400,6 +401,7 @@ def close_connection(conn):
     release_connection(conn)
     conns[str(conn)].state = State.CLOSED
 
+
 def retransmit_check(conn, pkt, seq, times=1):
     """
     检测是否需要超时重传
@@ -410,8 +412,11 @@ def retransmit_check(conn, pkt, seq, times=1):
     """
     if conns[str(conn)].state == State.CLOSED:
         return
-    if conns[str(conn)].sendbase + 1 << 32 * conns[str(conn)].base_cycle <= seq:
-        if times < 5:
+
+    if (conns[str(conn)].sendbase + (1 << 32) * conns[str(conn)].base_cycle) <= seq:
+        if times <= 5:
+            with open('record.txt', 'a+') as f:
+                f.write("retrans: {} {}  times: {}\n".format(conns[str(conn)].sendbase, seq, times))
             tcp_tx(conn, pkt)
             check = Timer(RTO / 1000 * 2 ** (times - 1), retransmit_check, (conn, pkt, seq, times + 1))
             check.start()
@@ -420,3 +425,6 @@ def retransmit_check(conn, pkt, seq, times=1):
             conns[str(conn)].state = State.CLOSED
             app_rst(conn)
             app_peer_rst(conn)
+    else:
+        with open('record.txt', 'a+') as f:
+            f.write("no retrans: {} {}\n".format(conns[str(conn)].sendbase, seq))
