@@ -287,8 +287,7 @@ def tcp_rx(conn: ConnectionIdentifier, data: bytes):
             # 进入TIME-WAIT阶段
             conns[str(conn)].state = State.TIMEWAIT
             # 倒计时
-            close_timer = Timer(CloseTime, close_connection, (conn,))
-            close_timer.start()
+            close_connection(conn)
 
     print("tcp_rx", conn)  # , data.decode(encoding='UTF-8',errors='replace'))
     print(conns[str(conn)].state, "\n")
