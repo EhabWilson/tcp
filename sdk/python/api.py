@@ -29,6 +29,7 @@ def release_connection(conn: ConnectionIdentifier):
     :return: 
     """
     sdk_event(conn, b'', 0x80)
+    print("Connnection released :", conn)
 
 
 def app_recv(conn: ConnectionIdentifier, data: bytes):
